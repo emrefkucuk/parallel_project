@@ -1,0 +1,39 @@
+target/
+*.class
+*.jar
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project-local (generated outputs; not needed to run)
+*.jfr
+report/
+payload/
+*.ndb.bak
+seed_manifest.json
+
+tmp/
+
+# Synthetic payloads / benchmark artefacts (can be huge)
+*.bin
+*.manifest.json
+*.csv
+*.png
+
+# ClamAV database artefacts (download/unpacked; not required at runtime)
+*.cvd
+*.cdiff
+*.sign
+
+# Local caches / misc
+.cursor/
