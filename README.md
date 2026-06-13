@@ -1,134 +1,134 @@
-# Dinamik İki Katmanlı Paralel Malware Tarayıcı (CENG479)
+# Dynamic Two-Tiered Parallel Malware Scanner (CENG479)
 
-Bu repo, **CENG479 Parallel Programming** dersi için hazırladığımız proje implementasyonudur.
-Temel işleyiş aşağıda belirtildiği gibidir:
+This repository contains the project implementation prepared for the **CENG479 Parallel Programming** course.
+The core operation is as follows:
 
-- Disk I/O’yu ölçümden çıkarmak için dosyayı **memory-map** etmek
-- CPU üzerinde **paylaşımlı bellek** modelinde paralel tarama yapmak
-- Irregular iş yükünde thread starvation’ı azaltmak için **ForkJoinPool work-stealing** kullanmak
-- İki aşamalı bir tarama pipeline’ı kurmak:
-  - **Tier 1 (hızlı filtre)**: byte seviyesinde **rolling hash (Rabin–Karp)**
-  - **Tier 2 (kesin doğrulama)**: sıfırdan **Aho–Corasick DFA** ile exact eşleşme
+- **Memory-mapping** the file to exclude disk I/O from measurements
+- Performing parallel scanning on a **shared-memory** model over the CPU
+- Using **ForkJoinPool work-stealing** to reduce thread starvation under irregular workloads
+- Building a two-tier scanning pipeline:
+  - **Tier 1 (fast filter)**: byte-level **rolling hash (Rabin-Karp)**
+  - **Tier 2 (precise verification)**: exact matching via a from-scratch **Aho-Corasick DFA**
 
 ---
 
-## Takım
+## Team
 
 - 22118080039 — Emre Faruk Küçük
 - 22118080058 — Yusuf Taha Sarıtiken
 
 ---
 
-## Proposal ve Repo Farkları
+## Differences Between the Proposal and the Repository
 
-Proposal’daki bazı noktalar pratikte karar gerektiriyordu. Biz şu şekilde sabitledik:
+Some points in the proposal required concrete decisions during implementation. Here is how they were resolved:
 
-- **ClamAV imzalarında wildcard konusu**  
-  - Proposal Tier 2’de *Aho–Corasick DFA* kullanılacağı ifade ediliyor.  
-  - ClamAV `.ndb` içinde `?`, `*`, `{n-m}` gibi wildcard/metakarakterli imzalar var.  
-  - **Karar**: Repo, yalnızca **wildcard içermeyen saf HEX** imzaları yüklüyor.  
-    Böylece Tier 2 gerçekten DFA olarak kalıyor ve proposal ile birebir örtüşüyor.
+- **Wildcard signatures in ClamAV**
+  - The proposal states that Tier 2 will use an *Aho-Corasick DFA*.
+  - ClamAV `.ndb` files contain signatures with wildcards and metacharacters such as `?`, `*` and `{n-m}`.
+  - **Decision**: The repository loads only **pure HEX** signatures that contain no wildcards.
+    This keeps Tier 2 a true DFA, in direct alignment with the proposal.
 
-- **İmza sayısı karışıklığı**  
-  - Proposal: trie’de on binlerce imza hedefliyor.  
-  - Doğruluk testi için ayrıca payload’a bilinen offset’lere imza gömmek gerekiyor.  
-  - **Karar**:
-    - Trie / signature set: `main_subset.ndb` içinde **50.000** imza
-    - Sentetik payload: bu imzalardan seçilmiş **200 seed** imza bilinen offset’lere enjekte ediliyor
-    - Böylece hem proposal’daki ölçek korunuyor hem de ground-truth doğrulama yapılabiliyor.
+- **Signature count ambiguity**
+  - The proposal targets tens of thousands of signatures in the trie.
+  - Correctness testing also requires injecting known signatures into the payload at known offsets.
+  - **Decision**:
+    - Trie / signature set: **50,000** signatures from `main_subset.ndb`
+    - Synthetic payload: **200 seed** signatures selected from those 50,000 are injected at known offsets
+    - This preserves the scale described in the proposal while enabling ground-truth validation.
 
-- **Proposaldaki karşılaştırma zorunluluğu**  
-  - Proposal sadece sequential baseline'ın yanı sıra **static, single-tier parallel** ile
-    **work-stealing** in karşılaştırılmasını istiyor.  
-  - **Karar**: İki paralel mod var:
+- **Comparison requirement in the proposal**
+  - The proposal requires benchmarking work-stealing against a **static, single-tier parallel** baseline in addition to the sequential baseline.
+  - **Decision**: Two parallel modes are provided:
     - `dynamic`: `ForkJoinPool` work-stealing
-    - `static`: `ExecutorService` ile sabit chunk dağıtımı
+    - `static`: fixed chunk distribution via `ExecutorService`
 
-- **Proposal metrik seti**  
-  - Proposal: speedup + efficiency + throughput (GB/s) + idle time + steal count + (opsiyonel) HW counters.  
-  - **Karar**: Benchmark çıktısı JSON/CSV + grafikler + `notes.md` olarak bundle içinde üretiliyor.
-    HW counter kısmı için (L1/L2 miss, stall cycles) harici profiler gerekiyor; bkz. `scripts/README.md`.
-
----
-
-## Proje Pipeline'ı
-
-### 1) İmza yükleme (`.ndb`)
-
-- Varsayılan imza dosyası: `src/main/resources/signatures/main_subset.ndb`
-- `SignatureLoader`, `.ndb` satırlarını parse eder ve **sadece saf HEX** imzaları alır.
-- `SignatureSet` oluşturulur:
-  - Tier 1 için rolling-hash tablosu
-  - Tier 2 için Aho–Corasick DFA
-
-### 2) Payload’ı pre-load etmek (I/O’yu ölçümden ayırmak)
-
-- Payload dosyası **memory-map** edilir ve **read-only** taranır.
-- Benchmark sırasında süre ölçümü, mapping tamamlandıktan sonra başlar.
-
-### 3) Chunking + overlap (N-1 kuralı)
-
-- Payload mantıksal chunk’lara bölünür.
-- **En uzun imza uzunluğu \(N\)** ise her chunk, kendi aralığına ek olarak **\(N-1\)** byte overlap okur.
-- Böylece bir imza chunk sınırını geçse bile en az bir thread tarafından yakalanır; inter-thread lock gerekmez.
-
-### 4) Tier 1 → Tier 2 pipeline
-
-- Her chunk üzerinde önce **rolling hash** ile hızlı tarama yapılır.
-- Hash collision olursa o offset’te **Aho–Corasick** ile kesin doğrulama yapılır.
-
-### 5) Paralellik (dynamic ve static)
-
-- `dynamic`: `ForkJoinPool` + work-stealing 
-- `static`: sabit dağıtım
+- **Proposal metric set**
+  - The proposal specifies: speedup + efficiency + throughput (GB/s) + idle time + steal count + (optional) hardware counters.
+  - **Decision**: Benchmark output is produced as a JSON/CSV + charts + `notes.md` bundle.
+    Hardware counters (L1/L2 miss, stall cycles) require an external profiler; see `scripts/README.md`.
 
 ---
 
-## Paralel Programlama
+## Project Pipeline
 
-Bu projede paralel programlama 3 ana yerde “çekirdek özellik” olarak kullanılıyor:
+### 1) Signature Loading (`.ndb`)
 
-### 1) Dinamik İş Dağıtımı: `ForkJoinPool` ve Work-Stealing
+- Default signature file: `src/main/resources/signatures/main_subset.ndb`
+- `SignatureLoader` parses `.ndb` lines and retains **only pure HEX** signatures.
+- A `SignatureSet` is constructed containing:
+  - A rolling-hash table for Tier 1
+  - An Aho-Corasick DFA for Tier 2
 
-Projede, iş parçacıkları (thread) arasındaki düzensiz yük dağılımını dengelemek amacıyla Java'nın **work-stealing** algoritmasını temel alan `ForkJoinPool` yapısı kullanılmaktadır. Zararlı yazılım (malware) imzalarının dosya içerisindeki dağılımı ve Tier 2 aşamasına geçiş sıklığı rastgele olabildiğinden, bazı veri bloklarının (chunk) taranması diğerlerinden daha uzun sürebilir. Bu düzensiz (irregular) iş yükünde kaynak israfını (thread starvation) önlemek için payload çok sayıda küçük iş parçasına bölünür. Bir iş parçacığı kendi kuyruğundaki işlemleri bitirdiğinde, boşta beklemek yerine diğer iş parçacıklarının kuyruğundan iş alarak (çalma - steal) CPU'nun maksimum verimde kullanılmasını sağlar. Benchmark testlerinde toplanan `stealCount` metriği sayesinde iş yükü dağılımındaki dengesizlik analiz edilebilmektedir.
+### 2) Pre-loading the Payload (Isolating I/O from Measurement)
 
-### 2) Statik Paralel Baseline
+- The payload file is **memory-mapped** and scanned as **read-only**.
+- During benchmarking, the performance timer starts only after mapping is complete.
 
-Proposal'da hedeflenen performans artışını ölçebilmek adına `ExecutorService` kullanılarak tasarlanmış, iş parçacıkları arasında dinamik yük paylaşımının olmadığı bir karşılaştırma modeli (baseline) sunulmaktadır. Bu yapıda, taranacak dosya baştan iş parçacığı sayısı kadar eşit parçaya bölünür. Görevini erken bitiren bir iş parçacığı boşa çıkar (idle) ve diğerlerinin işine yardımcı olmaz. Bu yaklaşım, dinamik iş dağıtımının avantajlarını (özellikle work-stealing algoritmasının "idle time" üzerindeki etkilerini) kıyaslamak amacıyla eklenmiştir.
+### 3) Chunking and Overlap (the N-1 Rule)
 
-### 3) Sınır Problemi: N-1 Overlap ile Lock-Free Doğruluk
+- The payload is divided into logical chunks.
+- If the longest signature length is **N**, each chunk reads **N-1** bytes of overlap beyond its own range.
+- This ensures that any signature straddling a chunk boundary is captured by at least one thread without any inter-thread locking.
 
-Paralel çalışan iş parçacıklarının tamamen bağımsız hareket edebilmeleri (inter-thread lock zorunluluğunu ortadan kaldırmak) için, tarama işlemi yapılacak veri blokları bir miktar örtüşecek (overlap) şekilde tasarlanmıştır. Veri kümesindeki en uzun imza boyutunun \(N\) olduğu baz alındığında, her thread kendi chunk aralığına ek olarak komşu bölümün \(N-1\) bytelık kısmını da taramaya dahil eder. Bu sayede blok sınırlarına denk gelen imzaların gözden kaçırılması engellenir. Analiz sonrası eşleşen bulgular, asıl bloğa ait olup olmama filtresinden geçirilerek aynı hit'in tekrarlı olarak kaydedilmesinin önüne geçilir.
+### 4) Tier 1 → Tier 2 Pipeline
 
-### 4) Paylaşımlı Bellek ve Lock-Free Yaklaşım
+- Each chunk is first scanned with the **rolling hash** for fast filtering.
+- On a hash collision, the **Aho-Corasick** DFA is run at that offset for precise verification.
 
-Performansı maksimize etmek için taranacak dosya belleğe read-only olarak eşlenir (`MappedByteBuffer`). Bu sayede tüm thread'ler veri kaynağına kilitlenmelere (locking) maruz kalmadan aynı anda erişebilir. Tespit edilen zararlı yazılım imzaları, süreç içerisinde kilit kullanımından kaçınmak amacıyla lock-free veri yapılarında toplanarak eşzamanlı erişim kaynaklı yavaşlamalar engellenir.
+### 5) Parallelism (dynamic and static)
 
-### 5) Paralel performans metrikleri
-
-Benchmark şu metrikleri üretir (CSV/JSON + grafik):
-
-- **Speedup**: \(S = T_s / T_p\)
-- **Efficiency**: \(E = S / p\)
-- **Throughput**: MB/s (raporda GB/s’ye çevrilebilir)
-- **Idle time**: thread’lerin boşta kaldığı süre tahmini
-- **Steal count**: work-stealing operasyon sayısı
-
-Donanım sayaçları (L1/L2 miss, stall cycles) için harici profiler gerekir: [`scripts/README.md`](scripts/README.md).
+- `dynamic`: `ForkJoinPool` + work-stealing
+- `static`: fixed distribution via `ExecutorService`
 
 ---
 
+## Parallel Programming
 
-## Docker ile Çalıştırma
+This project uses parallel programming as a core feature in three main areas:
 
-Projeyi herhangi bir sisteme (Java, Maven vb.) bağımlı kalmadan, platform bağımsız bir şekilde Docker üzerinde çalıştırabilirsiniz. İmaj içerisinde GUI desteği (noVNC) bulunmaktadır, böylece tarayıcı üzerinden uygulamanın arayüzüne erişebilirsiniz.
+### 1) Dynamic Work Distribution: `ForkJoinPool` and Work-Stealing
 
-### Ön Koşullar
-Sisteminize uygun Docker versiyonunun kurulu olması gerekmektedir:
-- **Windows / macOS**: [Docker Desktop](https://www.docker.com/products/docker-desktop/) kurulu ve uygulamanın arka planda çalışıyor olması gerekmektedir.
-- **Linux**: Docker Engine ve Docker Compose kurulu olmalı, ayrıca mevcut kullanıcınız tercihen `docker` grubuna dahil edilmiş olmalıdır.
+The project uses Java's `ForkJoinPool`, which is built on the **work-stealing** algorithm, to balance the irregular workload distribution across threads. Because the distribution of malware signatures within a file and the frequency of Tier 2 transitions are unpredictable, some chunks take significantly longer to scan than others. To prevent resource waste (thread starvation) under this irregular workload, the payload is divided into many small tasks. When a thread finishes its own queue, it steals work from another thread's queue instead of sitting idle, maximizing CPU utilization. The `stealCount` metric collected during benchmarks allows the workload imbalance to be analyzed.
 
-### İşletim Sistemine Göre Çalıştırma Adımları
+### 2) Static Parallel Baseline
+
+To measure the performance gain targeted by the proposal, a comparison model using `ExecutorService` is also provided, with no dynamic load sharing between threads. In this model, the payload is divided into exactly as many equal-sized chunks as there are threads before scanning begins. A thread that finishes early becomes idle and does not assist others. This model was added specifically to compare the advantages of dynamic work distribution, particularly the effect of work-stealing on idle time.
+
+### 3) Boundary Problem: Lock-Free Correctness via N-1 Overlap
+
+To allow parallel worker threads to operate completely independently and eliminate the need for inter-thread locks, the data blocks are designed to overlap slightly. Taking the longest signature length in the dataset as N, each thread scans N-1 bytes of the neighboring region beyond its own chunk boundary. This prevents signatures that coincide exactly with chunk boundaries from being missed. After scanning, each match is filtered against whether it belongs to the thread's assigned range, preventing the same hit from being recorded more than once.
+
+### 4) Shared Memory and the Lock-Free Approach
+
+To maximize performance, the payload file is mapped into memory as read-only (`MappedByteBuffer`). This allows all threads to access the same data source concurrently without any locking overhead. Detected signature matches are collected into lock-free data structures during processing, avoiding slowdowns caused by concurrent access contention.
+
+### 5) Parallel Performance Metrics
+
+The benchmark produces the following metrics (CSV/JSON + charts):
+
+- **Speedup**: S = T_s / T_p
+- **Efficiency**: E = S / p
+- **Throughput**: MB/s (convertible to GB/s in the report)
+- **Idle time**: estimated time threads spent waiting
+- **Steal count**: number of work-stealing operations
+
+For hardware counters (L1/L2 miss, stall cycles) an external profiler is required: [`scripts/README.md`](scripts/README.md).
+
+---
+
+## Running with Docker
+
+The project can be run on any system in a platform-independent manner via Docker, without requiring a local Java or Maven installation. The image includes GUI support via noVNC, so the application interface can be accessed through a browser.
+
+### Prerequisites
+
+Docker must be installed for your operating system:
+
+- **Windows / macOS**: [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running in the background.
+- **Linux**: Docker Engine and Docker Compose must be installed, and your current user should preferably be added to the `docker` group.
+
+### Steps by Operating System
 
 #### Windows
 
@@ -148,22 +148,22 @@ docker compose up --build
 docker compose up --build
 ```
 
-### Arayüze (GUI) Erişim
+### Accessing the GUI
 
-Konteyner başarıyla ayağa kalktıktan sonra (işletim sisteminden bağımsız olarak) web tarayıcınızdan aşağıdaki adrese giderek uygulamanın arayüzüne ulaşabilirsiniz:
+Once the container is up and running, navigate to the following address in your web browser to access the application interface (regardless of operating system):
+
 **http://localhost:8080/vnc.html**
 
 ---
 
-
-## Gereksinimler
+## Requirements
 
 - **JDK 17+**
 - **Apache Maven 3.9+**
-- (Opsiyonel) **JDK Mission Control (JMC)**: `.jfr` dosyasını açmak için  
+- (Optional) **JDK Mission Control (JMC)**: for opening `.jfr` files
   `jmc -open report\\bench-....jfr`
-- (Opsiyonel) HW counters için profiler: Intel VTune / AMD uProf / Linux perf  
-  Detay: [`scripts/README.md`](scripts/README.md)
+- (Optional) Profiler for hardware counters: Intel VTune / AMD uProf / Linux perf
+  Details: [`scripts/README.md`](scripts/README.md)
 
 ---
 
@@ -173,66 +173,66 @@ Konteyner başarıyla ayağa kalktıktan sonra (işletim sisteminden bağımsız
 mvn clean package
 ```
 
-Çıktı (runnable jar):
+Output (runnable jar):
 
 ```bat
 target\\parallel-malware-scanner.jar
 ```
+
 ---
 
-## Grafiksel Kullanıcı Arayüzü (GUI) ile Çalıştırma
+## Running with the GUI
 
-Projeyi derledikten sonra aşağıdaki komutla arayüzü başlatabilirsiniz:
+After building the project, start the interface with:
 
 ```bat
 java -jar target\parallel-malware-scanner.jar
 ```
 
-Uygulama arayüzü temel olarak iki bölümden oluşmaktadır:
+The application interface consists of two main sections:
 
-- **Tarama (Scan) Modülü**: Kullanıcıların imza veritabanını ve incelenecek veri dosyasını (payload) seçmesine olanak tanır. Tarama sürecinde kullanılacak aktif iş parçacığı (thread) sayısı ve veri bloğu büyüklüğü (chunk threshold) gibi parametreler ayarlanarak analiz başlatılabilir. İşlem sonlandığında, eşleşen zararlı yazılım imzalarının (hit) detaylı listesi ekrana yansıtılır.
-- **Performans Analizi (Benchmark) Modülü**: Uygulamanın farklı iş parçacığı sayılarında (ör. 1, 2, 4, 8, 16) sergilediği tarama performansını test etmeyi sağlar. Dinamik (work-stealing) ve statik görev dağıtımı modellerinin karşılaştırmalı analizini yapar, elde edilen hızlanma (speedup) ve verimlilik (efficiency) değerlerini grafiksel olarak sunar ve verilerin dışa aktarılmasına imkân tanır.
+- **Scan Module**: Allows users to select a signature database and a payload file to scan. Parameters such as the number of active threads and the chunk threshold can be configured before starting the analysis. Once the scan completes, a detailed list of matched malware signatures (hits) is displayed with offset, length, pattern index and name.
+- **Performance Analysis (Benchmark) Module**: Tests scanning performance across different thread counts (e.g. 1, 2, 4, 8, 16). Provides a comparative analysis of dynamic (work-stealing) and static task distribution models, presents the resulting speedup and efficiency values as charts and allows the data to be exported.
 
 ---
 
-## Komut Satırı (CLI) ile Analiz ve Raporlama
+## Command-Line (CLI) Analysis and Reporting
 
-Özellikle büyük veri setleriyle gerçekleştirilecek tekrarlı performans ölçümlerinde arayüz bağımlılığını ortadan kaldırmak için hazırlanan CLI betikleri kullanılabilir.
+CLI scripts are available to eliminate GUI dependency for repeated performance measurements, particularly with large datasets.
 
-**Standart Kullanım:**
-Örneğin 1024 MB boyutunda rastgele oluşturulmuş bir test verisiyle (payload) varsayılan analizi başlatmak için:
+**Standard Usage:**
+To start the default analysis with a randomly generated 1024 MB test payload:
 
 ```bat
 scripts\run-bench.bat 1024
 ```
 
-**Özelleştirilmiş Thread Konfigürasyonu:**
-Test sürecini önceden belirlenmiş belirli iş parçacığı kombinasyonlarında çalıştırmak isterseniz listeyi argüman olarak verebilirsiniz:
+**Custom Thread Configuration:**
+To run the benchmark with a specific set of thread counts, pass the list as an argument:
 
 ```bat
 scripts\run-bench.bat 1024 1;2;4;8;16 skewed
 ```
 
 > [!WARNING]
-> **Windows İşletim Sistemi İçin Önemli Not**: Windows Komut Satırı'nda (CMD) argüman geçişlerinde virgül (`,`) karakteri batch betiklerinin parametre ayrıştırmasını bozabilmektedir. Bu nedenle birden fazla thread konfigürasyonu girerken değerler arasında daima **noktalı virgül** (`;`) kullanılmalıdır.
+> **Important Note for Windows**: The comma (`,`) character can break parameter parsing in batch scripts on Windows CMD. Always use **semicolons** (`;`) when specifying multiple thread counts.
 
-**Oluşturulan Çıktılar ve Raporlar:**
-Benchmark işlemi tamamlandığında, uygulamanın kök dizinindeki `report\` klasörü altında kapsamlı ölçüm verileri derlenir:
+**Generated Outputs and Reports:**
+When the benchmark completes, comprehensive measurement data is compiled under the `report\` folder in the project root:
 
-- `bench-<etiket>-<zaman>.json` — Test sonrasında elde edilen ham metrikleri barındıran veri dosyası.
-- `bench-<etiket>-<zaman>.jfr` — İş parçacığı (thread) durumlarını, JIT derleme aşamalarını, bellek kullanımını ve metod düzeyinde CPU profilini barındıran detaylı JFR (Java Flight Recorder) analiz kaydı.
-- `bundle-<etiket>-<zaman>\` — Test sonuçlarının derlendiği toplu rapor klasörü:
-  - `benchmark_full.csv` — Karşılaştırmalı tüm analiz verilerini içeren özet tablo.
-  - `charts\` — İlgili değerlendirme metriklerinin (throughput, speedup, efficiency, idle time) oluşturulan görsel grafikleri.
-  - `notes.md` — Ölçümler baz alınarak otomatik şekilde üretilen değerlendirme ve yorum dosyası.
+- `bench-<label>-<timestamp>.json` — Raw metrics file produced after the run.
+- `bench-<label>-<timestamp>.jfr` — Detailed JFR (Java Flight Recorder) profile containing thread states, JIT compilation phases, memory usage and a method-level CPU profile.
+- `bundle-<label>-<timestamp>\` — Consolidated report folder:
+  - `benchmark_full.csv` — Summary table containing all comparative analysis data.
+  - `charts\` — Generated visual charts for the evaluation metrics (throughput, speedup, efficiency, idle time).
+  - `notes.md` — Automatically generated evaluation and commentary file based on the measurements.
 
 ---
 
-
-## Kod Yapısı (kısa)
+## Code Structure
 
 - `src/main/java/com/malwarescan/engine/` — `SignatureLoader`, `RollingHash`, `AhoCorasick`, `SignatureSet`
-- `src/main/java/com/malwarescan/scanner/` — sequential/dynamic/static tarama çekirdeği
-- `src/main/java/com/malwarescan/benchmark/` — benchmark runner + report bundle üretimi
-- `src/main/java/com/malwarescan/gui/` — Scan/Benchmark tab’ları + chart’lar
-- `src/test/java/com/malwarescan/` — unit testler
+- `src/main/java/com/malwarescan/scanner/` — sequential / dynamic / static scan core
+- `src/main/java/com/malwarescan/benchmark/` — benchmark runner + report bundle generation
+- `src/main/java/com/malwarescan/gui/` — Scan / Benchmark tabs + charts
+- `src/test/java/com/malwarescan/` — unit tests
