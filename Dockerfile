@@ -23,7 +23,7 @@ COPY --from=build /app/target/parallel-malware-scanner.jar /app/
 COPY src/main/resources/signatures /app/src/main/resources/signatures
 
 COPY scripts/docker-entry.sh /app/docker-entry.sh
-RUN chmod +x /app/docker-entry.sh
+RUN sed -i 's/\r$//' /app/docker-entry.sh && chmod +x /app/docker-entry.sh
 
 EXPOSE 8080
 
