@@ -1,0 +1,9 @@
+target/
+tmp/
+report/
+.git/
+.gitignore
+.classpath
+.project
+.settings/
+*.md
